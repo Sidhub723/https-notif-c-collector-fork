@@ -27,7 +27,7 @@ sysrepoctl --list
 
 - Then setup a example-config.xml file using any text editor and intiliaze/edit it as the  `running datastore`
 ```bash
-sysrepocfg --edit=example-config.xml datastore=running --format=xml
+sysrepocfg --copy-from=example-config.xml --datastore=running --format=xml --lock
 ```
 
 - Compile the sysrepo_read.c using the followings flags
@@ -46,6 +46,15 @@ Path: /example:capabilities/receiver-capabilities[receiver-capability='urn:ietf:
 Path: /example:capabilities/receiver-capabilities[receiver-capability='urn:ietf:capability:https-notif-receiver:encoding:xml'], Value: (null)
 Path: /example:capabilities/receiver-capabilities[receiver-capability='urn:ietf:capability:https-notif-receiver:sub-notif'], Value: (null)
 ```
+
+## validation only
+
+- can refer to the `yang_validate.c` example. To comiple 
+
+```bash
+gcc yang_validate.c -lyang
+```
+
 
 > Note for self reference :
 

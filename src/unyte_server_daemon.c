@@ -65,28 +65,109 @@ enum MHD_Result bad_request(struct MHD_Connection *connection)
   return ret;
 }
 
+// General function to queue a response with specified content and status code
+enum MHD_Result queue_response(struct MHD_Connection *connection, const char *content_type, const void *content, size_t content_length, int status_code) {
+    struct MHD_Response *response = MHD_create_response_from_buffer(content_length, (void *)content, MHD_RESPMEM_PERSISTENT);
+    
+    if (content_type) {
+        MHD_add_response_header(response, UHTTPS_CONTENT_TYPE, content_type);
+    }
+
+    enum MHD_Result ret = MHD_queue_response(connection, status_code, response);
+    MHD_destroy_response(response);
+    return ret;
+}
+
+// Handle case when both JSON and XML are available
+enum MHD_Result handle_available_content_response(struct MHD_Connection *connection, unyte_https_capabilities_t *capabilities, float q_xml, float q_json) {
+    if (!capabilities->json && !capabilities->xml) {
+        return queue_response(connection, NULL, NULL, 0, MHD_HTTP_NOT_ACCEPTABLE);
+    } else if (!capabilities->json && capabilities->xml) {
+        return queue_response(connection, UHTTPS_MIME_XML, capabilities->xml, capabilities->xml_length, MHD_HTTP_OK);
+    } else if (capabilities->json && !capabilities->xml) {
+        return queue_response(connection, UHTTPS_MIME_JSON, capabilities->json, capabilities->json_length, MHD_HTTP_OK);
+    } else {
+        if (q_xml >= q_json) {
+            printf("DEBUG: q_xml >= q_json\n");
+            return queue_response(connection, UHTTPS_MIME_XML, capabilities->xml, capabilities->xml_length, MHD_HTTP_OK);
+        } else {
+            printf("DEBUG: q_xml < q_json\n");
+            return queue_response(connection, UHTTPS_MIME_JSON, capabilities->json, capabilities->json_length, MHD_HTTP_OK);
+        }
+    }
+}
+
+enum MHD_Result handle_bad_request(struct MHD_Connection *connection) {
+    return queue_response(connection, NULL, NULL, 0, MHD_HTTP_BAD_REQUEST);
+}
+
+// Handle case where no Accept header is provided
+enum MHD_Result handle_no_accept_header(struct MHD_Connection *connection, unyte_https_capabilities_t *capabilities) {
+    return queue_response(connection, UHTTPS_MIME_XML, capabilities->xml, capabilities->xml_length, MHD_HTTP_OK);
+}
+
+// Determine and queue the appropriate content response based on q-values and capabilities
+enum MHD_Result handle_content_response(struct MHD_Connection *connection, unyte_https_capabilities_t *capabilities, float q_xml, float q_json) {
+    if (q_xml == 0 && q_json == 0) {
+        return queue_response(connection, UHTTPS_MIME_XML, capabilities->xml, capabilities->xml_length, MHD_HTTP_OK);
+    } else if (q_xml == 0 && q_json != 0 && capabilities->json) {
+        printf("DEBUG: q_xml = 0, q_json != 0\n");
+        return queue_response(connection, UHTTPS_MIME_JSON, capabilities->json, capabilities->json_length, MHD_HTTP_OK);
+    } else if (q_json == 0 && q_xml != 0 && capabilities->xml) {
+        printf("DEBUG: q_json = 0, q_xml != 0\n");
+        return queue_response(connection, UHTTPS_MIME_XML, capabilities->xml, capabilities->xml_length, MHD_HTTP_OK);
+    } else {
+        return handle_available_content_response(connection, capabilities, q_xml, q_json);
+    }
+}
+
+
+float get_q_value(const char *accept, const char *type) {
+    char *pos = strstr(accept, type);
+    if (!pos) {
+        return 0.0;  // Type not found, q=0
+    }
+
+    char *q_pos = strstr(pos, ";q=");
+    char *comma_pos = strchr(pos, ',');
+    
+    if (q_pos && (!comma_pos || q_pos < comma_pos)) {
+        return atof(q_pos + 3);  // Extract q value after ";q="
+    }
+    
+    return 1.0;  // Default q=1.0 if no q value is specified
+}
+
 enum MHD_Result get_capabilities(struct MHD_Connection *connection, unyte_https_capabilities_t *capabilities)
 {
   struct MHD_Response *response;
-  const char *req_content_type = MHD_lookup_connection_value(connection, MHD_HEADER_KIND, UHTTPS_CONTENT_TYPE);
-  // if application/xml send xml format else json
-    // CHANGE HERE, RE INITIALIZE THE STRUCTURE EVERY TIME A 
-  // GET CAPABILITIES REQUEST IS MADE?
-  // I think it makes sense to read from the sysrepo data store every time a get 
-  // capabilities request is made?
-  if (req_content_type != NULL && 0 == strcmp(req_content_type, UHTTPS_MIME_XML))
-  {
-    response = MHD_create_response_from_buffer(capabilities->xml_length, (void *)capabilities->xml, MHD_RESPMEM_PERSISTENT);
-    MHD_add_response_header(response, UHTTPS_CONTENT_TYPE, UHTTPS_MIME_XML);
-  }
-  else
-  {
-    response = MHD_create_response_from_buffer(capabilities->json_length, (void *)capabilities->json, MHD_RESPMEM_PERSISTENT);
-    MHD_add_response_header(response, UHTTPS_CONTENT_TYPE, UHTTPS_MIME_JSON);
-  }
-  enum MHD_Result ret = MHD_queue_response(connection, MHD_HTTP_OK, response);
-  MHD_destroy_response(response);
-  return ret;
+  /* The default reads from Content type header   */
+  // const char *req_content_type = MHD_lookup_connection_value(connection, MHD_HEADER_KIND, UHTTPS_CONTENT_TYPE);
+
+  /* But we would prefer to read from Accept header as mentioned 
+  in the draft (https://datatracker.ietf.org/doc/draft-ietf-netconf-https-notif/) in section 3.2 */
+  const char *req_accept_header = MHD_lookup_connection_value(connection, MHD_HEADER_KIND, UHTTPS_ACCEPT_HEADER);
+  enum MHD_Result ret;
+  
+  printf("DEBUG: req_content_type: %s\n", req_accept_header);
+
+  if (req_accept_header != NULL) {
+        float q_xml = get_q_value(req_accept_header, UHTTPS_MIME_XML);
+        float q_json = get_q_value(req_accept_header, UHTTPS_MIME_JSON);
+
+        printf("DEBUG: q_xml: %f, q_json: %f\n", q_xml, q_json);
+
+        if (q_json < 0 || q_xml < 0 || q_json > 1 || q_xml > 1) {
+            ret = handle_bad_request(connection);
+        } else {
+            ret = handle_content_response(connection, capabilities, q_xml, q_json);
+        }
+    } else {
+        ret = handle_no_accept_header(connection, capabilities);
+    }
+
+    return ret;
+
 }
 
 enum MHD_Result post_notification(struct MHD_Connection *connection,
